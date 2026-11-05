@@ -84,6 +84,31 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
   );
 }
 
+function JoinQR({ pin }: { pin: string }) {
+  const [src, setSrc] = useState('');
+  const url = typeof window !== 'undefined' ? `${window.location.origin}/?pin=${pin}` : '';
+  useEffect(() => {
+    let live = true;
+    if (!url) return;
+    (async () => {
+      try {
+        const mod: any = await import('qrcode');
+        const toDataURL = mod.toDataURL || mod.default?.toDataURL;
+        const d = await toDataURL(url, { width: 320, margin: 2, errorCorrectionLevel: 'M' });
+        if (live) setSrc(d);
+      } catch {}
+    })();
+    return () => { live = false; };
+  }, [url]);
+  if (!src) return null;
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <img src={src} width={200} height={200} alt={`QR code to join game ${pin}`} style={{ background: '#fff', borderRadius: 12 }} />
+      <div className="muted" style={{ fontSize: '.85rem', marginTop: 4 }}>Scan to join</div>
+    </div>
+  );
+}
+
 function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
   const { pin, hostToken, room, backend } = creds;
   const auth = useMemo(() => ({ hostToken }), [hostToken]);
@@ -114,6 +139,7 @@ function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
       {backend === 'firebase' && <div className="err">Backup server in use: the main database was unavailable when this game was created.</div>}
       <p className="muted">Join at <b>{origin}</b> with PIN</p>
       <div className="pin">{pin}</div>
+      <JoinQR pin={pin} />
       <p>{s.count} / 50 joined</p>
       <div className="chips" style={{ maxWidth: 700 }}>{(s.names || []).map((n: string) => <span className="chip" key={n}>{n}</span>)}</div>
       <button disabled={busy || s.count === 0} onClick={() => act('next')}>Start game</button>
