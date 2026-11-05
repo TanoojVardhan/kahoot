@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { post, load, save, drop, SHAPES } from '@/lib/client';
 import { useGame } from '@/lib/useGame';
+import { parseQuizFile } from '@/lib/excel';
 
 type Q = { text: string; options: string[]; correct: number; time: number };
 const blank = (): Q => ({ text: '', options: ['', '', '', ''], correct: 0, time: 20 });
@@ -19,6 +20,27 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
   const [qs, setQs] = useState<Q[]>([blank()]);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [importErrs, setImportErrs] = useState<string[]>([]);
+  const [importOk, setImportOk] = useState('');
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file after fixing it
+    if (!f) return;
+    setImportErrs([]); setImportOk('');
+    if (f.size > 2_000_000) { setImportErrs(['That file is larger than 2 MB.']); return; }
+    try {
+      const r = await parseQuizFile(f);
+      // All or nothing: a half-imported quiz hides mistakes.
+      if (r.errors.length) { setImportErrs(r.errors.slice(0, 12).concat(r.errors.length > 12 ? [`…and ${r.errors.length - 12} more`] : [])); return; }
+      const hasContent = qs.some((q) => q.text.trim() || q.options.some((o) => o.trim()));
+      if (hasContent && !confirm(`Replace your current ${qs.length} question(s) with the ${r.questions.length} from this file?`)) return;
+      setQs(r.questions);
+      setImportOk(`Loaded ${r.questions.length} question${r.questions.length === 1 ? '' : 's'} from ${f.name}. Check them below, then create the game.`);
+    } catch {
+      setImportErrs(['Could not read that file. Use the template and save it as .xlsx.']);
+    }
+  }
 
   useEffect(() => {
     const d = load('qh:draft');
@@ -46,6 +68,23 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
         <button className="ghost" onClick={() => { setTitle(SAMPLE.title); setQs(SAMPLE.questions); }}>Load sample</button>
       </div>
       <p className="muted">Up to 50 players. Leave an option blank to use fewer than 4.</p>
+      <div className="card" style={{ marginBottom: 12 }}>
+        <div className="row">
+          <b className="grow">Import from Excel</b>
+          <a href="/quiz-template.xlsx" download="quiz-template.xlsx">Download template</a>
+          <label style={{ cursor: 'pointer' }}>
+            <span className="ghost" style={{ display: 'inline-block', padding: '10px 16px', borderRadius: 10, border: '2px solid #4b3f78', fontWeight: 700 }}>Upload .xlsx</span>
+            <input type="file" accept=".xlsx" onChange={onFile} style={{ display: 'none' }} />
+          </label>
+        </div>
+        {importOk && <p style={{ color: '#7ee27e', margin: '10px 0 0' }}>{importOk}</p>}
+        {importErrs.length > 0 && (
+          <div className="err" style={{ marginTop: 10 }}>
+            <b>Nothing was imported. Fix these and upload again:</b>
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>{importErrs.map((m, i) => <li key={i}>{m}</li>)}</ul>
+          </div>
+        )}
+      </div>
       <input value={title} maxLength={100} onChange={(e) => setTitle(e.target.value)} placeholder="Quiz title" style={{ marginBottom: 12 }} />
       {qs.map((q, i) => (
         <div className="qedit" key={i}>
