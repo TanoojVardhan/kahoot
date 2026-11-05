@@ -1,7 +1,8 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { post, load, save, drop, SHAPES } from '@/lib/client';
 import { useGame } from '@/lib/useGame';
+import HomeButton from '@/lib/HomeButton';
 import { parseQuizFile } from '@/lib/excel';
 
 type Q = { text: string; options: string[]; correct: number; time: number };
@@ -22,11 +23,24 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
   const [busy, setBusy] = useState(false);
   const [importErrs, setImportErrs] = useState<string[]>([]);
   const [importOk, setImportOk] = useState('');
+  const [dragging, setDragging] = useState(false);
 
-  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+  function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     e.target.value = ''; // allow re-selecting the same file after fixing it
-    if (!f) return;
+    if (f) importFile(f);
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragging(false);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length === 0) return;
+    if (files.length > 1) { setImportOk(''); setImportErrs(['Drop one file at a time.']); return; }
+    importFile(files[0]);
+  }
+
+  async function importFile(f: File) {
     setImportErrs([]); setImportOk('');
     if (f.size > 2_000_000) { setImportErrs(['That file is larger than 2 MB.']); return; }
     try {
@@ -47,9 +61,16 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
         ]);
       }
     } catch {
-      setImportErrs(['Could not read that file. Use the template and save it as .xlsx.']);
+      setImportErrs(['Could not read that file. Use a template and save it as .xlsx or .csv.']);
     }
   }
+
+  useEffect(() => {
+    const stop = (e: DragEvent) => e.preventDefault();
+    window.addEventListener('dragover', stop);
+    window.addEventListener('drop', stop);
+    return () => { window.removeEventListener('dragover', stop); window.removeEventListener('drop', stop); };
+  }, []);
 
   useEffect(() => {
     const d = load('qh:draft');
@@ -72,20 +93,31 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
 
   return (
     <div className="wrap">
+      <HomeButton />
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <h1>Host a quiz</h1>
         <button className="ghost" onClick={() => { setTitle(SAMPLE.title); setQs(SAMPLE.questions); }}>Load sample</button>
       </div>
       <p className="muted">Up to 50 players. Leave an option blank to use fewer than 4.</p>
-      <div className="card" style={{ marginBottom: 12 }}>
+      <div
+        className="card"
+        style={{ marginBottom: 12, border: `2px dashed ${dragging ? 'var(--accent)' : '#4b3f78'}`, background: dragging ? '#34286a' : undefined }}
+        onDragOver={(e) => { e.preventDefault(); if (!dragging) setDragging(true); }}
+        onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false); }}
+        onDrop={onDrop}
+      >
         <div className="row">
           <b className="grow">Import from Excel</b>
-          <a href="/quiz-template.xlsx" download="quiz-template.xlsx">Download template</a>
+          <a href="/quiz-template.xlsx" download="quiz-template.xlsx">Excel template</a>
+          <a href="/quiz-template.csv" download="quiz-template.csv">CSV template</a>
           <label style={{ cursor: 'pointer' }}>
-            <span className="ghost" style={{ display: 'inline-block', padding: '10px 16px', borderRadius: 10, border: '2px solid #4b3f78', fontWeight: 700 }}>Upload .xlsx</span>
-            <input type="file" accept=".xlsx" onChange={onFile} style={{ display: 'none' }} />
+            <span className="ghost" style={{ display: 'inline-block', padding: '10px 16px', borderRadius: 10, border: '2px solid #4b3f78', fontWeight: 700 }}>Upload .xlsx or .csv</span>
+            <input type="file" accept=".xlsx,.csv" onChange={onFile} style={{ display: 'none' }} />
           </label>
         </div>
+        <p className="muted" style={{ margin: '10px 0 0', textAlign: 'center' }}>
+          {dragging ? 'Drop the file here' : 'or drag and drop an .xlsx or .csv file here'}
+        </p>
         {importOk && <p style={{ color: '#7ee27e', margin: '10px 0 0' }}>{importOk}</p>}
         {importErrs.length > 0 && (
           <div className="err" style={{ marginTop: 10 }}>
@@ -157,23 +189,67 @@ function JoinQR({ pin }: { pin: string }) {
   );
 }
 
+const DELAYS = [0, 5, 10, 15, 20, 30, 45, 60];
+
+function DelayPicker({ delay, onChange, label }: { delay: number; onChange: (d: number) => void; label: string }) {
+  return (
+    <label className="muted" style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+      {label}
+      <select value={delay} onChange={(e) => onChange(Number(e.target.value))} style={{ width: 'auto', padding: '6px 10px' }}>
+        {DELAYS.map((d) => <option key={d} value={d}>{d === 0 ? 'Manual (no auto-advance)' : `${d} seconds`}</option>)}
+      </select>
+    </label>
+  );
+}
+
 function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
   const { pin, hostToken, room, backend } = creds;
   const auth = useMemo(() => ({ hostToken }), [hostToken]);
   const { state: s, error, refresh, nowMs } = useGame(pin, auth, room || undefined, 2500, false);
   const [busy, setBusy] = useState(false);
   const [aerr, setAerr] = useState('');
+  // Seconds the results stay on screen before the next question starts. 0 = host clicks Next manually.
+  const [delay, setDelay] = useState(15);
+  const [hold, setHold] = useState(false);
+  const revealStart = useRef<{ key: string; at: number } | null>(null);
+  const fired = useRef('');
+  const live = useRef<any>({});
 
-  async function act(action: 'next' | 'reveal' | 'end') {
+  useEffect(() => { const d = load<number>('qh:delay'); if (typeof d === 'number' && DELAYS.includes(d)) setDelay(d); }, []);
+  const changeDelay = (d: number) => { setDelay(d); save('qh:delay', d); };
+
+  async function act(action: 'next' | 'reveal' | 'end'): Promise<boolean> {
     setBusy(true); setAerr('');
-    try { await post('/api/host', { pin, hostToken, action }); await refresh(); }
-    catch (e: any) { setAerr(e.message); }
+    try { await post('/api/host', { pin, hostToken, action }); await refresh(); return true; }
+    catch (e: any) { setAerr(e.message); return false; }
     finally { setBusy(false); }
   }
+
+  // Latest values for the timer below (it must not capture stale state).
+  live.current = { s, delay, hold, busy, act };
+
+  // Auto-advance: the host's screen starts the next question when the results delay is up.
+  // The server ignores a "next" that arrives in the wrong phase, so a double fire is harmless.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const { s: st, delay: d, hold: h, busy: b, act: doAct } = live.current;
+      if (!st || st.phase !== 'reveal') return;
+      const key = String(st.qIndex);
+      if (!revealStart.current || revealStart.current.key !== key) { revealStart.current = { key, at: Date.now() }; setHold(false); return; }
+      if (d > 0 && !h && !b && fired.current !== key && Date.now() - revealStart.current.at >= d * 1000) {
+        fired.current = key;
+        doAct('next').then((ok: boolean) => { if (!ok) setTimeout(() => { if (fired.current === key) fired.current = ''; }, 3000); });
+      }
+    }, 250);
+    return () => clearInterval(id);
+  }, []);
 
   if (!s) return <div className="center">{error ? <><div className="err">{error}</div><button onClick={onExit}>Back</button></> : <p className="muted">Loading…</p>}</div>;
 
   const origin = typeof window !== 'undefined' ? window.location.host : '';
+  const home = (
+    <HomeButton confirmText={s.phase === 'ended' ? undefined : 'Leave this screen? The game keeps its place, but nothing advances until you resume it from the Host page.'} />
+  );
   const footer = (
     <div className="row" style={{ justifyContent: 'center', marginTop: 24 }}>
       {s.phase !== 'ended' && <button className="danger" disabled={busy} onClick={() => { if (confirm('End the game for everyone?')) act('end'); }}>End game</button>}
@@ -184,12 +260,14 @@ function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
 
   if (s.phase === 'lobby') return (
     <div className="center">
+      {home}
       {backend === 'firebase' && <div className="err">Backup server in use: the main database was unavailable when this game was created.</div>}
       <p className="muted">Join at <b>{origin}</b> with PIN</p>
       <div className="pin">{pin}</div>
       <JoinQR pin={pin} />
       <p>{s.count} / 50 joined</p>
       <div className="chips" style={{ maxWidth: 700 }}>{(s.names || []).map((n: string) => <span className="chip" key={n}>{n}</span>)}</div>
+      <DelayPicker delay={delay} onChange={changeDelay} label="Show results for" />
       <button disabled={busy || s.count === 0} onClick={() => act('next')}>Start game</button>
       {footer}
     </div>
@@ -200,6 +278,7 @@ function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
     const left = Math.max(0, s.qEnd - nowMs());
     return (
       <div className="wrap">
+        {home}
         <div className="bar"><i style={{ width: `${Math.min(100, (left / total) * 100)}%` }} /></div>
         <div className="row" style={{ justifyContent: 'space-between', margin: '8px 0' }}>
           <span className="muted">Question {s.qIndex + 1} / {s.total}</span>
@@ -221,8 +300,11 @@ function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
     const counts: number[] = s.counts || [];
     const max = Math.max(1, ...counts);
     const last = s.qIndex + 1 >= s.total;
+    const started = revealStart.current && revealStart.current.key === String(s.qIndex) ? revealStart.current.at : Date.now();
+    const remaining = Math.max(0, Math.ceil((delay * 1000 - (Date.now() - started)) / 1000));
     return (
       <div className="wrap" style={{ textAlign: 'center' }}>
+        {home}
         <div className="q">{s.question.text}</div>
         <div className="hist">
           {s.question.options.map((o: string, i: number) => (
@@ -237,7 +319,18 @@ function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
         <h2>Top players</h2>
         <ol className="board" style={{ margin: '0 auto' }}>{(s.top || []).slice(0, 5).map((t: any, i: number) => <li key={i}><span>{i + 1}. {t.name}</span><b>{t.score}</b></li>)}</ol>
         <div className="row" style={{ justifyContent: 'center', marginTop: 16 }}>
-          <button disabled={busy} onClick={() => act('next')}>{last ? 'Finish' : 'Next question'}</button>
+          <button disabled={busy} onClick={() => act('next')}>{last ? 'Finish now' : 'Next question now'}</button>
+        </div>
+        <div className="row" style={{ justifyContent: 'center', marginTop: 12 }}>
+          <span className="muted">
+            {delay === 0 ? 'Auto-advance is off' : hold ? 'Auto-advance paused' : `${last ? 'Final results' : 'Next question'} in ${remaining}s`}
+          </span>
+          {delay > 0 && (
+            <button className="ghost" onClick={() => { if (hold) revealStart.current = { key: String(s.qIndex), at: Date.now() }; setHold(!hold); }}>
+              {hold ? 'Resume' : 'Hold'}
+            </button>
+          )}
+          <DelayPicker delay={delay} onChange={changeDelay} label="Results delay" />
         </div>
         {footer}
       </div>
@@ -246,6 +339,7 @@ function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
 
   return (
     <div className="center">
+      {home}
       <h1>Final results</h1>
       <ol className="board">{(s.top || []).map((t: any, i: number) => <li key={i}><span>{i + 1}. {t.name}</span><b>{t.score}</b></li>)}</ol>
       <button onClick={() => { drop(`qh:${pin}`); drop('qh:last'); onExit(); }}>New game</button>

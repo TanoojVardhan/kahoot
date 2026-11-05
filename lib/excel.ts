@@ -28,8 +28,9 @@ export function rowsToQuiz(rows: any[][]): ImportResult {
     const opts = [cell(c[1]), cell(c[2]), cell(c[3]), cell(c[4])];
     const filled = opts.filter(Boolean).length;
     const where = `Row ${row}${text ? ` ("${text.slice(0, 40)}${text.length > 40 ? '…' : ''}")` : ''}`;
-    let bad = false;
-    const fail = (m: string) => { errors.push(`${where}: ${m}`); bad = true; };
+    // One error line per bad row (all of its problems together), so errors.length = number of skipped rows.
+    const problems: string[] = [];
+    const fail = (m: string) => { problems.push(m); };
 
     if (!text) fail('question text is empty');
     else if (text.length > 300) fail('question text is longer than 300 characters');
@@ -53,16 +54,69 @@ export function rowsToQuiz(rows: any[][]): ImportResult {
       if (!Number.isInteger(n) || n < 5 || n > 120) fail(`"Seconds" must be a whole number from 5 to 120 (got "${t.slice(0, 20)}")`);
       else time = n;
     }
-    if (!bad) questions.push({ text, options: opts, correct, time });
+    if (problems.length) errors.push(`${where}: ${problems.join('; ')}`);
+    else questions.push({ text, options: opts, correct, time });
   }
   return { questions, errors };
 }
 
-// Reads the first sheet of an .xlsx file in the browser.
+// ---------- CSV ----------
+
+/** Minimal RFC 4180 parser: quoted fields, "" escapes, line breaks inside quotes, CRLF, BOM, and , ; or tab separators. */
+export function parseCsv(input: string): string[][] {
+  let text = input.charCodeAt(0) === 0xfeff ? input.slice(1) : input;
+
+  // Pick the separator from the first line, ignoring anything inside quotes (Excel in many locales writes ';').
+  const counts: Record<string, number> = { ',': 0, ';': 0, '\t': 0 };
+  let q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === '"') q = !q;
+    else if (!q && (ch === '\n' || ch === '\r')) break;
+    else if (!q && ch in counts) counts[ch]++;
+  }
+  const delim = Object.keys(counts).reduce((a, b) => (counts[b] > counts[a] ? b : a), ',');
+
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += ch;
+    } else if (ch === '"' && field === '') inQ = true; // a quote only opens a quoted field at the field start
+    else if (ch === delim) { row.push(field); field = ''; }
+    else if (ch === '\r' || ch === '\n') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += ch;
+  }
+  if (inQ) throw new Error('unclosed quote');
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+// Excel's plain "CSV" is often Windows-1252, not UTF-8. Try UTF-8 strictly first, then fall back.
+async function readText(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch { return new TextDecoder('windows-1252').decode(buf); }
+}
+
+// Reads an .xlsx (first sheet) or .csv file in the browser.
 export async function parseQuizFile(file: File): Promise<ImportResult> {
-  if (!/\.xlsx$/i.test(file.name)) return { questions: [], errors: ['Please upload an .xlsx file (use the template). Old .xls and .csv are not supported.'] };
-  const mod: any = await import('read-excel-file');
-  const read = mod.default || mod;
-  const rows: any[][] = await read(file);
-  return rowsToQuiz(rows);
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.csv')) {
+    try { return rowsToQuiz(parseCsv(await readText(file))); }
+    catch { return { questions: [], errors: ['That CSV file is malformed (a quote is never closed). Re-save it from Excel as CSV, or use the template.'] }; }
+  }
+  if (name.endsWith('.xlsx')) {
+    const mod: any = await import('read-excel-file');
+    const read = mod.default || mod;
+    const rows: any[][] = await read(file);
+    return rowsToQuiz(rows);
+  }
+  return { questions: [], errors: ['Please upload an .xlsx or .csv file (use the template). Old .xls files are not supported.'] };
 }
