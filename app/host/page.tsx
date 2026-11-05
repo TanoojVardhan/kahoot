@@ -31,12 +31,21 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
     if (f.size > 2_000_000) { setImportErrs(['That file is larger than 2 MB.']); return; }
     try {
       const r = await parseQuizFile(f);
-      // All or nothing: a half-imported quiz hides mistakes.
-      if (r.errors.length) { setImportErrs(r.errors.slice(0, 12).concat(r.errors.length > 12 ? [`…and ${r.errors.length - 12} more`] : [])); return; }
+      if (r.questions.length === 0) {
+        setImportErrs(r.errors.length ? ['Nothing was imported.', ...r.errors.slice(0, 12)] : ['No questions found in that file.']);
+        return;
+      }
       const hasContent = qs.some((q) => q.text.trim() || q.options.some((o) => o.trim()));
-      if (hasContent && !confirm(`Replace your current ${qs.length} question(s) with the ${r.questions.length} from this file?`)) return;
+      if (hasContent && !confirm(`Replace your current ${qs.length} question(s) with the ${r.questions.length} valid one(s) from this file?`)) return;
       setQs(r.questions);
-      setImportOk(`Loaded ${r.questions.length} question${r.questions.length === 1 ? '' : 's'} from ${f.name}. Check them below, then create the game.`);
+      const skipped = r.errors.length;
+      setImportOk(`Imported ${r.questions.length} question${r.questions.length === 1 ? '' : 's'} from ${f.name}.`);
+      if (skipped) {
+        setImportErrs([
+          `${skipped} row${skipped === 1 ? ' was' : 's were'} NOT imported. Add ${skipped === 1 ? 'it' : 'them'} yourself with "+ Add question" below, or fix the file and upload again:`,
+          ...r.errors.slice(0, 12).concat(skipped > 12 ? [`…and ${skipped - 12} more`] : []),
+        ]);
+      }
     } catch {
       setImportErrs(['Could not read that file. Use the template and save it as .xlsx.']);
     }
@@ -80,8 +89,8 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
         {importOk && <p style={{ color: '#7ee27e', margin: '10px 0 0' }}>{importOk}</p>}
         {importErrs.length > 0 && (
           <div className="err" style={{ marginTop: 10 }}>
-            <b>Nothing was imported. Fix these and upload again:</b>
-            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>{importErrs.map((m, i) => <li key={i}>{m}</li>)}</ul>
+            <b>{importErrs[0]}</b>
+            <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>{importErrs.slice(1).map((m, i) => <li key={i}>{m}</li>)}</ul>
           </div>
         )}
       </div>

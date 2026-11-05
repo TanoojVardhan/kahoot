@@ -1,4 +1,4 @@
-// Turns spreadsheet rows into quiz questions. Pure and side-effect free so the rules can be tested.
+// Turns spreadsheet rows into quiz questions. Valid rows are kept; each bad row is skipped and reported in `errors`. Pure and side-effect free so the rules can be tested.
 // Columns: Question | Option A | Option B | Option C | Option D | Correct (A-D) | Seconds (optional)
 
 export type ImportedQ = { text: string; options: string[]; correct: number; time: number };
@@ -17,13 +17,17 @@ export function rowsToQuiz(rows: any[][]): ImportResult {
     data.push({ row: i + 1, c });
   });
   if (data.length === 0) return { questions, errors: ['No questions found. Fill in the Questions sheet below the header row.'] };
-  if (data.length > MAX_Q) return { questions, errors: [`Too many questions (${data.length}). The limit is ${MAX_Q}.`] };
 
   for (const { row, c } of data) {
+    // Past the limit: keep the first MAX_Q, report the rest as one line.
+    if (questions.length + errors.filter((e) => e.startsWith('Row')).length >= MAX_Q) {
+      errors.push(`Rows ${row} onward were NOT imported: a quiz can have at most ${MAX_Q} questions.`);
+      break;
+    }
     const text = cell(c[0]);
     const opts = [cell(c[1]), cell(c[2]), cell(c[3]), cell(c[4])];
     const filled = opts.filter(Boolean).length;
-    const where = `Row ${row}`;
+    const where = `Row ${row}${text ? ` ("${text.slice(0, 40)}${text.length > 40 ? '…' : ''}")` : ''}`;
     let bad = false;
     const fail = (m: string) => { errors.push(`${where}: ${m}`); bad = true; };
 
@@ -57,7 +61,7 @@ export function rowsToQuiz(rows: any[][]): ImportResult {
 // Reads the first sheet of an .xlsx file in the browser.
 export async function parseQuizFile(file: File): Promise<ImportResult> {
   if (!/\.xlsx$/i.test(file.name)) return { questions: [], errors: ['Please upload an .xlsx file (use the template). Old .xls and .csv are not supported.'] };
-  const mod: any = await import('read-excel-file/browser');
+  const mod: any = await import('read-excel-file');
   const read = mod.default || mod;
   const rows: any[][] = await read(file);
   return rowsToQuiz(rows);
