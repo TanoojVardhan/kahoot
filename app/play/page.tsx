@@ -7,7 +7,7 @@ import { useGame } from '@/lib/useGame';
 function Player({ pin, creds }: { pin: string; creds: any }) {
   const router = useRouter();
   const auth = useMemo(() => ({ id: creds.id, token: creds.token }), [creds.id, creds.token]);
-  const { state: s, error, refresh, nowMs } = useGame(pin, auth, creds.room, 5000, true);
+  const { state: s, error, refresh, nowMs } = useGame(pin, auth, creds.room || undefined, creds.backend === 'firebase' ? 3000 : 5000, true);
   const [sending, setSending] = useState(false);
   const [localChoice, setLocalChoice] = useState<number | null>(null);
   const [aerr, setAerr] = useState('');
@@ -33,7 +33,7 @@ function Player({ pin, creds }: { pin: string; creds: any }) {
 
   if (s.phase === 'lobby') return (
     <div className="center">
-      <h1>You&apos;re in{me ? `, ${me.name}` : ''}!</h1>
+      <h1>You&apos;re in{(me?.name || creds.name) ? `, ${me?.name || creds.name}` : ''}!</h1>
       <p className="muted">{s.count} player{s.count === 1 ? '' : 's'} joined. Waiting for the host to start…</p>
     </div>
   );

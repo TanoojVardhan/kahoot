@@ -7,7 +7,11 @@ export function db(): SupabaseClient {
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (!url || !key) throw new Error('Server is missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
-    _db = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+    _db = createClient(url, key, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      // A dead Supabase must fail fast, not hang the request until the platform kills it.
+      global: { fetch: (u: any, o: any) => fetch(u, { ...o, signal: AbortSignal.timeout(8000) }) },
+    });
   }
   return _db;
 }
@@ -19,13 +23,35 @@ export function ip(req: Request): string {
   return (h.get('x-forwarded-for') || h.get('x-real-ip') || 'unknown').split(',')[0].trim();
 }
 
-// Fails open: a broken limiter must not take the game down.
+export function withTimeout<T>(p: PromiseLike<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    Promise.resolve(p).then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+// Per-instance limiter. Used for Firebase games and as the fallback when Supabase is unreachable.
+// Serverless instances do not share memory, so this is best-effort, not a hard cap.
+const mem = new Map<string, number[]>();
+export function memLimit(key: string, max: number, windowSecs: number): boolean {
+  const t = Date.now();
+  const arr = (mem.get(key) || []).filter((x) => t - x < windowSecs * 1000);
+  arr.push(t);
+  mem.set(key, arr);
+  if (mem.size > 5000) mem.clear();
+  return arr.length <= max;
+}
+
+// Never lets a broken limiter take the game down: falls back to the in-memory limiter.
 export async function limit(key: string, max: number, windowSecs: number): Promise<boolean> {
   try {
-    const { data, error } = await db().rpc('rate_hit', { p_key: key, p_max: max, p_window: windowSecs });
-    if (error) { console.error('rate_hit', error.message); return true; }
-    return data === true;
-  } catch (e) { console.error('rate_hit', e); return true; }
+    const r: any = await withTimeout(db().rpc('rate_hit', { p_key: key, p_max: max, p_window: windowSecs }), 2000);
+    if (r.error) throw new Error(r.error.message);
+    return r.data === true;
+  } catch (e: any) {
+    console.error('rate_hit unavailable, using memory limiter:', e?.message);
+    return memLimit(key, max, windowSecs);
+  }
 }
 
 // Tells connected clients "state changed, refetch". Clients also poll, so a failure here is not fatal.
@@ -36,6 +62,7 @@ export async function broadcast(room: string) {
       method: 'POST',
       headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: [{ topic: `r-${room}`, event: 'v', payload: { t: Date.now() }, private: false }] }),
+      signal: AbortSignal.timeout(3000),
     });
     if (!res.ok) console.error('broadcast failed', res.status, await res.text());
   } catch (e) { console.error('broadcast', e); }
@@ -49,14 +76,17 @@ export async function body(req: Request): Promise<any> {
   try { return await req.json(); } catch { return {}; }
 }
 
-export const isPin = (p: any) => typeof p === 'string' && /^\d{6}$/.test(p);
-
-export async function hostGame(pin: any, hostToken: any) {
-  if (!isPin(pin) || typeof hostToken !== 'string' || !hostToken) return null;
-  const { data } = await db().from('games').select('pin,room,host_hash').eq('pin', pin).maybeSingle();
-  if (!data || data.host_hash !== sha(hostToken)) return null;
-  return data;
+// Wraps a route so unexpected errors become a readable JSON message instead of a bare 500.
+export async function handle(fn: () => Promise<Response>): Promise<Response> {
+  try { return await fn(); } catch (e: any) {
+    console.error(e);
+    const m = String(e?.message || '');
+    if (/missing SUPABASE|not configured/i.test(m)) return bad(m, 503);
+    return bad('Server error, please try again', 500);
+  }
 }
+
+export const isPin = (p: any) => typeof p === 'string' && /^\d{6}$/.test(p);
 
 export type Quiz = { title: string; questions: { text: string; options: string[]; correct: number; time: number }[] };
 

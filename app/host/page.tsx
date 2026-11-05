@@ -33,7 +33,7 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
     setBusy(true); setErr('');
     try {
       const r = await post('/api/create', { quiz: { title, questions: qs } });
-      const c = { pin: r.pin, room: r.room, hostToken: r.hostToken };
+      const c = { pin: r.pin, room: r.room, hostToken: r.hostToken, backend: r.backend };
       save(`qh:${r.pin}`, c); save('qh:last', r.pin);
       onCreated(c);
     } catch (e: any) { setErr(e.message); setBusy(false); }
@@ -85,9 +85,9 @@ function Editor({ onCreated }: { onCreated: (c: any) => void }) {
 }
 
 function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
-  const { pin, hostToken, room } = creds;
+  const { pin, hostToken, room, backend } = creds;
   const auth = useMemo(() => ({ hostToken }), [hostToken]);
-  const { state: s, error, refresh, nowMs } = useGame(pin, auth, room, 2500, false);
+  const { state: s, error, refresh, nowMs } = useGame(pin, auth, room || undefined, 2500, false);
   const [busy, setBusy] = useState(false);
   const [aerr, setAerr] = useState('');
 
@@ -111,6 +111,7 @@ function Controller({ creds, onExit }: { creds: any; onExit: () => void }) {
 
   if (s.phase === 'lobby') return (
     <div className="center">
+      {backend === 'firebase' && <div className="err">Backup server in use: the main database was unavailable when this game was created.</div>}
       <p className="muted">Join at <b>{origin}</b> with PIN</p>
       <div className="pin">{pin}</div>
       <p>{s.count} / 50 joined</p>

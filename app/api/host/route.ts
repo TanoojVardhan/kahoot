@@ -1,25 +1,20 @@
-import { db, bad, body, hostGame, broadcast } from '@/lib/server';
+import { sha, bad, body, isPin, handle } from '@/lib/server';
+import { backendFor, notify } from '@/lib/backend';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
-  const b = await body(req);
-  const g = await hostGame(b.pin, b.hostToken);
-  if (!g) return bad('Not authorised', 403);
-  let result: any = null;
-  if (b.action === 'next') {
-    const { data, error } = await db().rpc('fn_advance', { p_pin: g.pin });
-    if (error) { console.error('advance', error); return bad('Could not advance', 500); }
-    result = data;
-  } else if (b.action === 'reveal') {
-    const { error } = await db().rpc('fn_reveal', { p_pin: g.pin, p_force: true });
-    if (error) { console.error('reveal', error); return bad('Could not reveal', 500); }
-    result = 'ok';
-  } else if (b.action === 'end') {
-    const { error } = await db().rpc('fn_end', { p_pin: g.pin });
-    if (error) { console.error('end', error); return bad('Could not end', 500); }
-    result = 'ended';
-  } else return bad('Unknown action');
-  await broadcast(g.room);
-  return Response.json({ result });
+  return handle(async () => {
+    const b = await body(req);
+    if (!isPin(b.pin) || !b.hostToken) return bad('Not authorised', 403);
+    const be = backendFor(b.pin);
+    if (!(await be.hostRoom(b.pin, sha(String(b.hostToken))))) return bad('Not authorised', 403);
+    let result: any;
+    if (b.action === 'next') result = await be.advance(b.pin);
+    else if (b.action === 'reveal') { await be.reveal(b.pin, true); result = 'ok'; }
+    else if (b.action === 'end') { await be.end(b.pin); result = 'ended'; }
+    else return bad('Unknown action');
+    await notify(be, b.pin);
+    return Response.json({ result });
+  });
 }
